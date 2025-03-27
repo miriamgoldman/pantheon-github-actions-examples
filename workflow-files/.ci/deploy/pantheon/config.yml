@@ -1,0 +1,6 @@
+command:
+  build:
+    workflow:
+      wait:
+        options:
+          max: 800

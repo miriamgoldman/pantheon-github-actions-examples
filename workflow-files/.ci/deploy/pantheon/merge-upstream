@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Usage
+# ./merge-upstream <site-name or uuid> <environment>
+
+# Exit on error
+set -e
+
+SITE=$1;
+ENV=$2;
+DEV=$(echo "${SITE}.dev")
+TEST=$(echo "${SITE}.test")
+LIVE=$(echo "${SITE}.live")
+START=$SECONDS
+
+echo "Merging upstream on ${SITE}.${ENV}"
+
+# Clear upstream cache and apply upstream updates
+terminus site:upstream:clear-cache ${SITE}
+terminus upstream:updates:apply --accept-upstream -- ${SITE}.${ENV}
+
+# Report time to results.
+DURATION=$(( SECONDS - START ))
+TIME_DIFF=$(bc <<< "scale=2; $DURATION / 60")
+MIN=$(printf "%.2f" $TIME_DIFF)
+echo -e "Finished ${SITE}.${ENV} in ${MIN} minutes"

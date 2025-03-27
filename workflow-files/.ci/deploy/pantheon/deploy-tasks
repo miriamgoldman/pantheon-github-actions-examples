@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# Usage
+# ./deploy-tasks <site-name or uuid> <environment>
+
+# Exit on error
+set -e
+
+SITE=$1;
+ENV=$2;
+DEV=$(echo "${SITE}.dev")
+TEST=$(echo "${SITE}.test")
+LIVE=$(echo "${SITE}.live")
+START=$SECONDS
+
+
+drush_cr () {
+  # Clear Drupal cache, retrying up to 3 times if it fails
+echo "Clearing Drupal cache..."
+  retries=3
+  while [[ $retries -gt 0 ]]; do
+    terminus -n drush ${SITE}.${ENV} -- cr 2>&1
+    if [ "$?" = "0" ]; then
+      break
+    else
+      echo "::warning:: drush cache:rebuild command failed - retrying in 30 seconds."
+      sleep 30
+      retries=$((retries-1))
+    fi
+  done
+}
+
+# Run drush updb, retrying up to 3 times if it fails
+drush_updb () {
+echo "Running Drupal updates..."
+  retries=3
+  while [[ $retries -gt 0 ]]; do
+    terminus -n drush ${SITE}.${ENV} -- updb -y 2>&1
+    if [ "$?" = "0" ]; then
+      break
+    else
+      echo "::warning:: drush updb command failed - retrying in 30 seconds."
+      sleep 30
+      retries=$((retries-1))
+    fi
+  done
+}
+
+# Run config:import, retrying up to 3 times if it fails
+drush_cim () {
+echo "Importing drupal configuration..."
+  retries=3
+  while [[ $retries -gt 0 ]]; do
+    terminus -n drush ${SITE}.${ENV} -- config:import -y 2>&1
+    if [ "$?" = "0" ]; then
+      break
+    else
+      echo "::warning:: drush config:import command failed - retrying in 30 seconds."
+      sleep 30
+      retries=$((retries-1))
+    fi
+  done
+}
+
+# Check if Drupal is bootstrapped, retrying up to 3 times if it fails
+check_bootstrap () {
+  local retries=3
+  local DRUPAL_BOOTSTRAPPED=1
+  while [ $retries -gt 0 ]; do
+      terminus -n drush ${SITE}.${ENV} -- status --field=bootstrap 2>&1
+      DRUPAL_BOOTSTRAPPED="$?"
+    if [[ "$DRUPAL_BOOTSTRAPPED" == 0 ]]; then
+      echo "Drupal bootstrapped successfully."
+      break
+    else
+      echo "Drupal not bootstrapped, waiting 15 seconds and checking again."
+      sleep 15
+      retries=$((retries - 1))
+      if [[ $retries -eq 0 ]]; then
+        echo "Drupal not bootstrapped after 3 retries, exiting."
+        DRUPAL_BOOTSTRAPPED=1
+      fi
+    fi
+  done
+
+  return $DRUPAL_BOOTSTRAPPED
+
+}
+
+echo "Running deploy tasks on on ${SITE}.${ENV}"
+
+echo "Checking if drupal is bootstrapped"
+check_bootstrap
+
+drush_updb
+
+drush_cim
+
+# Ensure that the site is not in maintenance mode
+terminus drush ${SITE}.${ENV} -- state:set system.maintenance_mode 0
+
+drush_cr
+
+
+# Report time to results.
+DURATION=$(( SECONDS - START ))
+TIME_DIFF=$(bc <<< "scale=2; $DURATION / 60")
+MIN=$(printf "%.2f" $TIME_DIFF)
+echo -e "Finished ${SITE}.${ENV} in ${MIN} minutes"

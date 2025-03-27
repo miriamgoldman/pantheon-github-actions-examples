@@ -1,0 +1,226 @@
+name: Build and deploy custom upstream to Pantheon Multidevs
+on:
+  push:
+    branches:
+      - develop
+      - 'release/**'
+  pull_request:
+    branches:
+      - develop
+      - 'release/**'
+      - master
+    
+defaults:
+  run:
+    shell: bash
+env:
+  TZ: "/usr/share/zoneinfo/America/Los_Angeles"
+  TERM: dumb
+  ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+  ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+  ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
+  GITHUB_TOKEN: ${{ github.token }}
+  TERMINUS_TOKEN: ${{ secrets.TERMINUS_TOKEN }}
+  CI_BRANCH: ${{ github.head_ref || github.ref_name }}
+  TARGET_BRANCH: ${{  github.event.pull_request.base.ref }}
+  COMMIT_SHA: ${{ github.sha }}
+  CI_BUILD_NUMBER: ${{ github.run_number }}
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  GITHUB_OWNER: ${{ github.repository_owner }}
+  CI_PROJECT_NAME: ${{ github.repository }}
+  PR_NUMBER: ${{ github.event.number }}
+  CI_PULL_REQUEST: ${{ github.event.pull_request._links.html.href }}
+  ORG_UUID: ${{ secrets.ORG_UUID }} # Customer Production Org UUID
+  UPSTREAM_UUID: ${{ secrets.UPSTREAM_UUID }} # Customer Custom Upstream UUID
+  PRODUCTION_BRANCH: 'master'
+  DEVELOPMENT_BRANCH: 'develop'
+
+
+jobs:
+  create_site_matrix:
+    name: Create Matrix of Org Sites using Custom Upstream
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/pantheon-public/build-tools-ci:8.x-php8.1
+      options: --user root
+    outputs:
+      SITE_MATRIX: ${{ steps.save_matrix.outputs.site_matrix }}
+      SITE_LIST: ${{ steps.save_matrix.outputs.site_list }}
+    steps:
+      - name: Terminus login
+        run: |
+          terminus -n auth:login --machine-token="$TERMINUS_TOKEN"
+      - name: Get List of Sites using Custom Upstream
+        run: |
+          echo SITES="$(terminus org:site:list --upstream=$UPSTREAM_UUID --field name -- $ORG_UUID | tr "\n" ",")" >> $GITHUB_ENV
+      - name: Save Site Matrix to Output
+        id: save_matrix
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const sites = `${{ env.SITES }}`;
+            const siteList = sites.includes(",") ? sites.split(",").filter(site => site).map(site => `"${site}"`).join(","): `"${sites}"`;
+            core.setOutput("site_matrix", `{"site": [${siteList}]}`);
+            core.setOutput("site_list", sites.replaceAll(",", " "));
+
+  configure_env_vars:
+    name: Running build setup and configuration tasks
+    container:
+      image: quay.io/pantheon-public/build-tools-ci:8.x-php8.1
+      options: --user root
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Set bash_env env var
+        run: echo BASH_ENV=${RUNNER_TEMP}/bash_env.txt >> $GITHUB_ENV
+
+      - name: Cache bash_env.txt
+        uses: actions/cache@v2
+        env:
+          cache-name: cache-bash-env
+        with:
+          path: ${{ env.BASH_ENV }}
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ github.run_number }}
+
+      # Set TERMINUS_ENV and related environment variables.
+      # https://github.com/pantheon-systems/docker-build-tools-ci/blob/6.x/scripts/set-environment
+      - name: setup-environment-vars
+        run: |
+          if [ "$CI_BRANCH" != "master" ]; then
+            # Test vars not set means trigger = push.
+            if [ -z "$PR_NUMBER" ]; then
+              # Var not set means trigger = push.
+              export PR_NUMBER=`curl -u "${GITHUB_OWNER}:${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github.groot-preview+json" \
+                "https://api.github.com/repos/${CI_PROJECT_NAME}/commits/${COMMIT_SHA}/pulls" | \
+                jq '.[0].number | select(.!=null)'`
+            fi
+            if [ -z "$CI_PULL_REQUEST" ]; then
+              export CI_PULL_REQUEST=`curl -u "${GITHUB_OWNER}:${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github.groot-preview+json" \
+                "https://api.github.com/repos/${CI_PROJECT_NAME}/commits/${COMMIT_SHA}/pulls" | \
+                jq '.[0].html_url | select(.!=null)'`
+            fi
+          fi
+          export CI_PROJECT_REPONAME=${GITHUB_REPOSITORY#*/}
+          export CI_PROJECT_USERNAME=${GITHUB_REPOSITORY_OWNER}
+          /build-tools-ci/scripts/set-environment
+          GITHUB_WORKFLOW_URL=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          echo "export CI_BUILD_URL='${GITHUB_WORKFLOW_URL}'" >> $BASH_ENV
+          echo "export CI_NODE_INDEX=0" >> $BASH_ENV
+          echo "export CI_REPOSITORY_URL='https://github.com/${GITHUB_REPOSITORY}'" >> $BASH_ENV
+          echo "export ARTIFACTS_DIR_URL='${GITHUB_WORKFLOW_URL}/#artifacts'" >> $BASH_ENV
+
+  deploy_to_pantheon:
+    name: Deploy to Pantheon environment
+    container:
+      image: quay.io/pantheon-public/build-tools-ci:8.x-php8.1
+      options: --user root
+    runs-on: ubuntu-latest
+    needs: create_site_matrix
+    strategy:
+      matrix: ${{ fromJson(needs.create_site_matrix.outputs.SITE_MATRIX) }}
+    env:
+      DEFAULT_SITE: ${{ matrix.site }}
+      TERMINUS_SITE: ${{ matrix.site }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Set bash_env env var
+        run: |
+          echo BASH_ENV=${RUNNER_TEMP}/bash_env.txt >> $GITHUB_ENV
+
+      - name: Cache bash_env.txt
+        uses: actions/cache@v2
+        env:
+          cache-name: cache-bash-env
+        with:
+          path: ${{ env.BASH_ENV }}
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ github.run_number }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+
+      - name: Cache drush folder
+        uses: actions/cache@v2
+        env:
+          cache-name: cache-drush
+        with:
+          path: ./drush
+          key: ${{ runner.os }}-build-${{ env.cache-name }}
+
+      # Set TERMINUS_ENV and related environment variables.
+      # https://github.com/pantheon-systems/docker-build-tools-ci/blob/6.x/scripts/set-environment
+      - name: setup-environment-vars
+        run: |
+          export DEFAULT_SITE=${{ env.DEFAULT_SITE }}
+          export TERMINUS_SITE=${{ env.DEFAULT_SITE }}
+          echo "export DEFAULT_SITE=${{ env.DEFAULT_SITE }}" >> $BASH_ENV
+          echo "export TERMINUS_SITE=${DEFAULT_SITE}" >> $BASH_ENV
+          /build-tools-ci/scripts/set-environment
+
+      - name: ssh key setup
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          config: ${{ secrets.SSH_CONFIG }}
+          known_hosts: ${{ secrets.KNOWN_HOSTS }}
+
+      # Deploy to Pantheon
+      - name: deploy to Pantheon
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "$SSH_PRIVATE_KEY" > ../private.key
+          chmod 600 ../private.key
+          eval `ssh-agent -s`
+          ssh-add ../private.key
+          source $BASH_ENV
+          ssh-add -L | ssh-keygen -l -E md5 -f - | awk '{print substr($2,5)}'
+          ./.ci/deploy/pantheon/dev-multidev
+
+  static_tests:
+    name: Run linting, validation, and coding standards tests
+    container:
+      image: quay.io/pantheon-public/build-tools-ci:8.x-php8.1
+      options: --user root
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Cache composer cache
+        uses: actions/cache@v2
+        env:
+          cache-name: cache-composer-cache
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      # Set TERMINUS_ENV and related environment variables.
+      # https://github.com/pantheon-systems/docker-build-tools-ci/blob/8.x/scripts/set-environment
+      - name: setup-environment-vars
+        run: /build-tools-ci/scripts/set-environment
+
+      - name: Install composer dependencies
+        run: |
+          composer --no-interaction --no-progress --prefer-dist --optimize-autoloader install
+    
+      - name: Run static tests
+        run: |
+          ./.ci/test/static/run
+

@@ -1,0 +1,28 @@
+#!/bin/bash
+
+set -eo pipefail
+
+#
+# This script runs static tests which
+# can be performed without code execution.
+#
+# Some example are code sniffing and unit testing
+#
+
+# Run composer install to get the vendor directory
+
+# Delete and reset the web directory
+# This is necessary so that third-party
+# dependencies are not tested
+git clean -fdX web
+
+# Run unit tests
+composer -n unit-test
+
+# Lint php code for syntax errors
+composer -n lint
+
+# Check coding standards
+composer -n code-sniff
+
+echo -e "Not failling builds due to code sniff failures - see above"

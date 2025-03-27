@@ -1,0 +1,4 @@
+Host *.drush.in
+  StrictHostKeyChecking no
+  PubkeyAcceptedKeyTypes ssh-rsa
+  HostkeyAlgorithms +ssh-rsa
