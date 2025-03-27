@@ -39,8 +39,8 @@ To ensure the GitHub Actions run properly, a repository administrator must confi
    > ⚠️ **Do not set a passphrase** on the SSH key.
 
 5. **Add the SSH Public Key**  
-   - To **Pantheon**: for access to the site.
-   - To **GitHub**: add it as a deploy key with write access if needed.
+   - To **Pantheon**: `terminus ssh-key:add id_rsa_ghactions.pub`
+   - To **GitHub**:  `gh ssh-key add id_rsa_ghactions.pub`
 
 ---
 
